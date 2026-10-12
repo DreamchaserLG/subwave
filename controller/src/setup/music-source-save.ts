@@ -10,7 +10,7 @@ import { clearServerCaches } from '../music/subsonic.js';
 import { refreshAutoPlaylist } from '../broadcast/scheduler.js';
 import { queue } from '../broadcast/queue.js';
 import { startReconcile, tagger } from '../broadcast/tagger.js';
-import { resetFailover } from '../music/source-failover.js';
+import { refreshFailoverConnection, resetFailover } from '../music/source-failover.js';
 import { applyNavidromeToLiveConfig, loadSetupConfig, saveSetupConfig, syncRouterConfig } from './config.js';
 import { resolveNavidrome } from './navidrome-policy.js';
 import {
@@ -189,6 +189,7 @@ export async function applyNavidromeConnection(submitted: { url?: string; user?:
   } else {
     await syncRouterConfig();
     if (!usesStationNavidrome(sel)) return false;
+    refreshFailoverConnection(await stationNavidrome());
     // Best effort: the router also notices the rewritten config.json on its own poll.
     await routerReload().catch(() => null);
   }

@@ -29,6 +29,7 @@ const express = (await import('express')).default;
 const ms = await import('../src/setup/music-source.js');
 const setupConfig = await import('../src/setup/config.js');
 const { config } = await import('../src/config.js');
+const failover = await import('../src/music/source-failover.js');
 const { tagger, switchBlocksMessage } = await import('../src/broadcast/tagger.js');
 const { router: musicRoutes } = await import('../src/routes/settings/music-source.js');
 const { router: coreRoutes } = await import('../src/routes/settings/core.js');
@@ -281,4 +282,42 @@ test('the booth line names the track blocks a switch could not place', () => {
     'Music source switch: 3 blocked tracks were not found on the new source (Lost Song — Nobody; Other and 1 more) — if they are there under different names, block them again',
   );
   assert.match(switchBlocksMessage({ count: 1, tracks: [] }), /^Music source switch: 1 blocked track was not found/);
+});
+
+test('saving Navidrome credentials during an outage updates the active fallback and preserves recovery', async () => {
+  const markerPath = path.join(stateRoot, 'music-source-switch.json');
+  const beforeMarker = readFileSync(markerPath, 'utf8');
+  let routerUp = false;
+  const deps = {
+    probeRouter: async () => ({ ok: routerUp, reason: routerUp ? undefined : 'ECONNREFUSED' }),
+    probeDirect: async () => true,
+    afterSwitch() {},
+  };
+  failover.resetFailover();
+  await failover.failoverTick(deps);
+  assert.equal(await failover.failoverTick(deps), 'activate');
+  const beforeFailover = failover.failoverState();
+  const stopped = new Promise<void>((resolve) => routerProc.child.once('exit', () => resolve()));
+  routerProc.stop();
+  await stopped;
+
+  const updated = { url: 'http://127.0.0.1:9', user: 'updated-user', pass: 'updated-password' };
+  const saved = await call('POST', '/settings/navidrome', updated);
+  assert.equal(saved.status, 200, JSON.stringify(saved.body));
+  assert.deepEqual(saved.body, { ok: true });
+  const direct = { url: updated.url, user: updated.user, password: updated.pass };
+  const liveConnection = () => ({ url: config.navidrome.url, user: config.navidrome.user, password: config.navidrome.password });
+  assert.deepEqual(liveConnection(), direct);
+  assert.deepEqual(failover.failoverState(), beforeFailover, 'saving keeps the outage state');
+  for (let i = 0; i < 3; i++) assert.equal(await failover.failoverTick(deps), 'hold');
+  assert.deepEqual(liveConnection(), direct, 'outage checks keep using the saved credentials');
+  const routerConfig = JSON.parse(readFileSync(path.join(routerDir, 'config.json'), 'utf8'));
+  assert.deepEqual(routerConfig.sources[0].config, direct);
+  assert.equal(readFileSync(markerPath, 'utf8'), beforeMarker, 'a credential save is not a source switch');
+
+  routerUp = true;
+  assert.equal(await failover.failoverTick(deps), 'hold');
+  assert.equal(await failover.failoverTick(deps), 'restore');
+  assert.equal(config.navidrome.url, routerProc.url);
+  assert.equal(failover.failoverState().active, false);
 });

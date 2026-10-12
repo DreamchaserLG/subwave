@@ -79,7 +79,12 @@ export function SourcesTab({ view, adminFetch, reload }: SourcesTabProps) {
         </V3Alert>
       )}
 
-      {direct ? <DirectMode view={view} adminFetch={adminFetch} reload={reload} /> : <RouterSources view={view} adminFetch={adminFetch} reload={reload} />}
+      {direct ? <DirectMode view={view} adminFetch={adminFetch} reload={reload} /> : (
+        <>
+          <RouterSources view={view} adminFetch={adminFetch} reload={reload} />
+          <DirectCard view={view} adminFetch={adminFetch} reload={reload} />
+        </>
+      )}
     </div>
   );
 }
@@ -103,15 +108,23 @@ function RouterSources({ view, adminFetch, reload }: SourcesTabProps) {
     // Without the router's manifests the other sources cannot be edited, but
     // the station's Navidrome connection needs none — and it is what plays
     // while the router is down, so it stays fixable.
-    return view.sources.every((s) => s.plugin === NAVIDROME) ? (
-      <Card title="Navidrome" sub="the station’s Navidrome — the default source">
-        <div className="grid gap-4">
-          <div className="field-hint">Other sources can be added once the music router answers again.</div>
-          <NavidromeConnection navidrome={view.navidrome} adminFetch={adminFetch} onSaved={() => void reload()} />
-        </div>
-      </Card>
-    ) : (
-      <Card title="Sources"><div className="text-[13px] text-muted">Waiting for the music router — its plugin list says how to show these sources.</div></Card>
+    const navidromeOnly = view.sources.every((s) => s.plugin === NAVIDROME);
+    return (
+      <>
+        {!navidromeOnly && (
+          <Card title="Sources"><div className="text-[13px] text-muted">Waiting for the music router — its plugin list says how to show these sources.</div></Card>
+        )}
+        <Card title="Navidrome" sub="the station’s connection">
+          <div className="grid gap-4">
+            <div className="field-hint">
+              {navidromeOnly
+                ? 'Other sources can be added once the music router answers again.'
+                : 'Save a Navidrome connection to play directly while the router is unavailable.'}
+            </div>
+            <NavidromeConnection navidrome={view.navidrome} adminFetch={adminFetch} onSaved={() => void reload()} />
+          </div>
+        </Card>
+      </>
     );
   }
 
@@ -218,6 +231,12 @@ function RouterSources({ view, adminFetch, reload }: SourcesTabProps) {
         );
       })}
 
+      {!usesNavidrome && !view.router && (
+        <Card title="Navidrome" sub="the station’s connection">
+          <NavidromeConnection navidrome={view.navidrome} adminFetch={adminFetch} onSaved={() => void reload()} />
+        </Card>
+      )}
+
       <Card title={merge ? 'Merged library' : 'More sources'} sub={merge ? 'experimental' : undefined}>
         <div className="grid gap-3">
           <div className="field-hint">
@@ -249,7 +268,6 @@ function RouterSources({ view, adminFetch, reload }: SourcesTabProps) {
         <Btn tone="accent" onClick={save} disabled={busy || !dirty}>{busy ? 'Saving…' : 'Save sources'}</Btn>
       </div>
 
-      <DirectCard view={view} adminFetch={adminFetch} reload={reload} />
     </>
   );
 }

@@ -16,7 +16,7 @@
 // flapping one must not rebuild auto.m3u on every tick.
 
 import { config } from '../config.js';
-import { currentSelection, readRouterAuth, routerConnection, routerServing } from '../setup/music-source.js';
+import { currentSelection, readRouterAuth, routerConnection, routerServing, type StationNavidrome } from '../setup/music-source.js';
 import { storedNavidrome } from '../setup/config.js';
 import { isStationNavidromeOnly, type MusicSelection } from '../schemas/music-source.js';
 import { clearServerCaches, pingWith } from './subsonic.js';
@@ -65,6 +65,10 @@ let upStreak = 0;
 
 export function failoverState(): FailoverState & { eligible: boolean } {
   return { ...state, eligible: failoverEligible(currentSelection()) };
+}
+
+export function refreshFailoverConnection(nav: StationNavidrome): void {
+  if (state.active && failoverEligible(currentSelection())) Object.assign(config.navidrome, nav);
 }
 
 /** A save just applied its own connection; whatever the monitor had decided no longer stands. */

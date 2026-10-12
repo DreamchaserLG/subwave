@@ -26,7 +26,11 @@ const UNIMPLEMENTED = [0, 30];
 // The extensions probe runs inside construction, which the registry gives 15s
 // before refusing the whole selection (registry.ts CONSTRUCT_TIMEOUT_MS), so it
 // gets a third of that and is a "no" when it runs out.
-const EXTENSIONS_PROBE_MS = Number(process.env.ROUTER_NAVIDROME_PROBE_MS) || 5_000;
+const DEFAULT_EXTENSIONS_PROBE_MS = 5_000;
+const configuredProbeMs = Number(process.env.ROUTER_NAVIDROME_PROBE_MS);
+const EXTENSIONS_PROBE_MS = Number.isInteger(configuredProbeMs) && configuredProbeMs > 0 && configuredProbeMs <= DEFAULT_EXTENSIONS_PROBE_MS
+  ? configuredProbeMs
+  : DEFAULT_EXTENSIONS_PROBE_MS;
 
 class SubsonicError extends Error {
   constructor(
