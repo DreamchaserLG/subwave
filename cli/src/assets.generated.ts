@@ -38,6 +38,14 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile.caddy
+      # No build attestations: BuildKit stamps each one fresh, and with the
+      # containerd image store that gives an unchanged, fully cached image a
+      # NEW id on every build. \`up -d --build controller\` rebuilds broadcast
+      # as a dependency, so the new id recreated the mixer and dropped every
+      # listener on a controller-only deploy. Published images keep theirs
+      # (publish-images.yml builds separately).
+      provenance: false
+      sbom: false
     container_name: sub-wave-caddy
     restart: unless-stopped
     logging: *default-logging
@@ -66,6 +74,8 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile.broadcast
+      provenance: false
+      sbom: false
     container_name: sub-wave-broadcast
     restart: unless-stopped
     logging: *default-logging
@@ -115,6 +125,8 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile.controller
+      provenance: false
+      sbom: false
       args:
         # Version reported by the controller; unset → controller/package.json.
         - SUBWAVE_BUILD_VERSION=\${SUBWAVE_BUILD_VERSION:-}
@@ -137,6 +149,8 @@ services:
       - TZ=\${TZ:-Europe/London}
       - STATE_DIR=/var/sub-wave
       - SOUNDS_DIR=/sounds
+      # Maintainer-only, hidden Discovery Bench. Empty keeps its routes disabled.
+      - SUBWAVE_DISCOVERY_BENCH=\${SUBWAVE_DISCOVERY_BENCH:-}
       # Container path of the STEMS_DIR bind mount above — empty when the
       # operator did not relocate, which keeps the cache under the state dir
       # exactly as before. Named apart from STEMS_DIR on purpose: that one is a
@@ -192,6 +206,8 @@ services:
     build:
       context: .
       dockerfile: web/Dockerfile
+      provenance: false
+      sbom: false
       args:
         # Source builds only — absolute URLs render off the RUNTIME env below.
         - SITE_URL=\${SITE_URL:-}
@@ -210,6 +226,7 @@ services:
     environment:
       - NODE_ENV=production
       - SUBWAVE_HOMEPAGE=\${SUBWAVE_HOMEPAGE:-player}
+      - SUBWAVE_DISCOVERY_BENCH=\${SUBWAVE_DISCOVERY_BENCH:-}
       - SUBWAVE_DJ_BRAIN_ENABLED=\${SUBWAVE_DJ_BRAIN_ENABLED:-false}
       # RUNTIME source of truth for absolute URLs (canonicals, og:url,
       # robots.txt, sitemap.xml) — the generic image serves any domain.
@@ -236,6 +253,8 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile.tts-heavy
+      provenance: false
+      sbom: false
       args:
         # GPU opt-in (source build only): point at a CUDA wheel index and layer
         # on docker-compose.tts-heavy-gpu.yml. See docs/gpu-tts.md.
@@ -310,6 +329,8 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile.analyzer
+      provenance: false
+      sbom: false
       args:
         # Local build mirrors the pulled image: lean unless ANALYZER_HEAVY set.
         WITH_CLAP: \${ANALYZER_HEAVY:+1}
@@ -421,6 +442,14 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile.broadcast
+      # No build attestations: BuildKit stamps each one fresh, and with the
+      # containerd image store that gives an unchanged, fully cached image a
+      # NEW id on every build. \`up -d --build controller\` rebuilds broadcast
+      # as a dependency, so the new id recreated the mixer and dropped every
+      # listener on a controller-only deploy. Published images keep theirs
+      # (publish-images.yml builds separately).
+      provenance: false
+      sbom: false
     container_name: sub-wave-broadcast
     restart: unless-stopped
     logging: *default-logging
@@ -464,6 +493,8 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile.controller
+      provenance: false
+      sbom: false
       args:
         # Version reported by the controller; unset → controller/package.json.
         - SUBWAVE_BUILD_VERSION=\${SUBWAVE_BUILD_VERSION:-}
@@ -482,6 +513,8 @@ services:
       - TZ=\${TZ:-Europe/London}
       - STATE_DIR=/var/sub-wave
       - SOUNDS_DIR=/sounds
+      # Maintainer-only, hidden Discovery Bench. Empty keeps its routes disabled.
+      - SUBWAVE_DISCOVERY_BENCH=\${SUBWAVE_DISCOVERY_BENCH:-}
       # Container path of the STEMS_DIR bind mount above — empty when the
       # operator did not relocate, which keeps the cache under the state dir
       # exactly as before. Named apart from STEMS_DIR on purpose: that one is a
@@ -537,6 +570,8 @@ services:
     build:
       context: .
       dockerfile: web/Dockerfile
+      provenance: false
+      sbom: false
       args:
         - SITE_URL=\${SITE_URL:-}
         - NEXT_PUBLIC_GA_ID=\${NEXT_PUBLIC_GA_ID:-}
@@ -553,6 +588,7 @@ services:
     environment:
       - NODE_ENV=production
       - SUBWAVE_HOMEPAGE=\${SUBWAVE_HOMEPAGE:-player}
+      - SUBWAVE_DISCOVERY_BENCH=\${SUBWAVE_DISCOVERY_BENCH:-}
       - SUBWAVE_DJ_BRAIN_ENABLED=\${SUBWAVE_DJ_BRAIN_ENABLED:-false}
       - SITE_URL=\${SITE_URL:-}
       # Set to 1 to keep the shared product pages (landing, docs, news,
@@ -578,6 +614,8 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile.tts-heavy
+      provenance: false
+      sbom: false
       args:
         # GPU opt-in (source build only) — see docs/gpu-tts.md.
         CHATTERBOX_TORCH_INDEX_URL: \${CHATTERBOX_TORCH_INDEX_URL:-https://download.pytorch.org/whl/cpu}
@@ -638,6 +676,8 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile.analyzer
+      provenance: false
+      sbom: false
       args:
         # Local build mirrors the pulled image: lean unless ANALYZER_HEAVY set.
         WITH_CLAP: \${ANALYZER_HEAVY:+1}
@@ -717,6 +757,14 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile.broadcast
+      # No build attestations: BuildKit stamps each one fresh, and with the
+      # containerd image store that gives an unchanged, fully cached image a
+      # NEW id on every build. \`up -d --build controller\` rebuilds broadcast
+      # as a dependency, so the new id recreated the mixer and dropped every
+      # listener on a controller-only deploy. Published images keep theirs
+      # (publish-images.yml builds separately).
+      provenance: false
+      sbom: false
     # No \`platform:\` pin. On Apple Silicon, forcing linux/amd64 routes
     # liquidsoap through emulation where clock_nanosleep fails
     # (\`Unix.Unix_error(EUNKNOWNERR 0)\`) — the clock loop dies on every boot
@@ -770,6 +818,8 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile.controller
+      provenance: false
+      sbom: false
       args:
         # Version reported by the controller; unset → controller/package.json.
         # The dev web UI resolves its own via \`git describe\` (next.config.js).
@@ -789,6 +839,8 @@ services:
       - TZ=\${TZ:-Europe/London}
       - STATE_DIR=/var/sub-wave
       - SOUNDS_DIR=/sounds
+      # Maintainer-only, hidden Discovery Bench. Empty keeps its routes disabled.
+      - SUBWAVE_DISCOVERY_BENCH=\${SUBWAVE_DISCOVERY_BENCH:-}
       # Container path of the STEMS_DIR bind mount above — empty when the
       # operator did not relocate, which keeps the cache under the state dir
       # exactly as before. Named apart from STEMS_DIR on purpose: that one is a
@@ -856,6 +908,8 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile.tts-heavy
+      provenance: false
+      sbom: false
       args:
         # GPU opt-in (source build only) — see docs/gpu-tts.md.
         CHATTERBOX_TORCH_INDEX_URL: \${CHATTERBOX_TORCH_INDEX_URL:-https://download.pytorch.org/whl/cpu}
@@ -913,6 +967,8 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile.analyzer
+      provenance: false
+      sbom: false
       args:
         # Local build mirrors the pulled image: lean unless ANALYZER_HEAVY set.
         WITH_CLAP: \${ANALYZER_HEAVY:+1}
