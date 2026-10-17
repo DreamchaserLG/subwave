@@ -37,7 +37,7 @@ import {
   breakerSuccess,
 } from './dj-agent/breaker.js';
 import { dropEchoedLink, enqueuePick, generatePickLink, trackFields, trimLinkToIntro } from './dj-agent/enqueue.js';
-import { advanceRun, runActive } from './dj-agent/runs.js';
+import { advanceRun, notePickShow, runActive } from './dj-agent/runs.js';
 import { prepareEpisodeContext, showPreparation } from './show-preparation.js';
 import { prepareShortlistSearches } from './shortlist-search-preparation.js';
 import { pickSchemaBase, pickSystem, requestSystem, resolveEditorialLeanings, transitionChoiceNudge, type EditorialLeaningsContext } from './dj-agent/schemas.js';
@@ -48,7 +48,7 @@ import * as likes from './likes.js';
 import { classifyPickFailure, SEED_NOT_A_PICK_CLAUSE, type PickFailure } from '../util/pick-seed.js';
 import { buildShortlist } from '../music/shortlist.js';
 import { genreRun } from '../music/genre-run.js';
-import { djPick, shortlistClauseSelectionReason, shortlistConversation, shortlistPickPrompt, shortlistPickSchema, shortlistReasonForLeanings, shortlistSituation, type ShortlistPickResolution, type ShortlistSelectionContext } from './dj-agent/shortlist-pick.js';
+import { djPick, FAVOURITES_INSIDE_SHOW, shortlistClauseSelectionReason, shortlistConversation, shortlistPickPrompt, shortlistPickSchema, shortlistReasonForLeanings, shortlistSituation, type ShortlistPickResolution, type ShortlistSelectionContext } from './dj-agent/shortlist-pick.js';
 import { shortlistOffers } from '../music/shortlist-offers.js';
 import { SHORTLIST_PASSES_DEFAULT } from '../schemas/settings.js';
 import { shortlistSourceHint } from '../music/shortlist-presentation.js';
@@ -141,7 +141,7 @@ async function repickFromSeen({ seen, badId, predecessor, showAt = null, playlis
       // effects are active), so a corrective re-pick chooses a fresh transition
       // for its new track instead of settling into one effect.
       prompt: shortlistRepick
-        ? shortlistPickPrompt([...seen.values()], selectionContext) + `\n\n${why}`
+        ? shortlistPickPrompt([...seen.values()], selectionContext, { showOnAir: !!settings.resolveActiveShow(showAt ?? undefined) }) + `\n\n${why}`
         : JSON.stringify({
           ...(Array.isArray(selectionContext.recentTransitions) ? { context: { recentTransitions: selectionContext.recentTransitions } } : {}),
           ...(predecessor ? { predecessor } : {}),
@@ -1425,26 +1425,42 @@ export async function runTrackEvent(queue, ctx, { wantLink, showAt = null, pickA
     // selection outright — no agent, no pool, and no mini-run or journey
     // steering, which is why it runs before advanceRun. Only the link still
     // costs a model call. False means it stood aside and today's paths run.
-    if (await pickInOrder(queue, ctx, { wantLink, pickAnchor, showAt, eventText })) return;
+    // A walked pick still records its show, so the next advanceRun sees the
+    // show change it crossed (#1911).
+    if (await pickInOrder(queue, ctx, { wantLink, pickAnchor, showAt, eventText })) {
+      notePickShow(settings.resolveActiveShow(showAt ?? undefined));
+      return;
+    }
 
     const djMode = !!settings.getEffectivePersona()?.djMode;
+    // The show this pick will air in, on the same look-ahead clock as the pick
+    // brief (pickSystem) and the discovery locks (livePickerScope). A run
+    // belongs to one show, and a journey heads somewhere inside it (#1911).
+    const pickShow = settings.resolveActiveShow(showAt ?? undefined);
     // Feature 4 + Phase 2 — advance/maybe-start a mini-run; get the tempo/key
     // re-rank target and (when the audio index supports it) a sonic-journey
     // waypoint for the pool's audio anchor.
-    const { rankTarget, audioWaypoint } = timePhase('pick.advanceRun', () => advanceRun(djMode, pickAnchor));
+    const { rankTarget, audioWaypoint, endedForShow } = await timePhase('pick.advanceRun', () => advanceRun(djMode, pickAnchor, { show: pickShow }));
+    if (endedForShow) queue.log('picker', `show change — the DJ-mode run ends here; this pick is chosen for ${pickShow ? `"${pickShow.name}"` : 'the autonomous block'}`);
     const inRun = runActive();
 
     // Selection steering stays in this prompt, but it no longer shares a
-    // response schema with listener speech.
+    // response schema with listener speech. With a show on air both clauses
+    // defer to its brief (#1911): each is the last concrete instruction in the
+    // pick event, and a small model followed "keep the energy moving" over the
+    // brief in its system prompt. With no show they are byte-identical to before.
+    const showFirst = pickShow ? ', inside this show\'s brief — the brief outranks the run' : '';
     const runClause = inRun
-      ? ` You're mid-run — keep the energy moving in the same direction (a touch ${energyForDaypart().speed >= 1 ? 'brisker' : 'mellower'}).`
+      ? ` You're mid-run — keep the energy moving in the same direction (a touch ${energyForDaypart().speed >= 1 ? 'brisker' : 'mellower'})${showFirst}.`
       : '';
     // Gated on the waypoint itself, not inRun: on a run's final pick the run
     // state is already cleared (advanceRun) but the last waypoint — the
     // destination itself — is still the one to land on.
-    const journeyClause = audioWaypoint && audioWaypoint.length
-      ? ' A sonic journey is active: call tracksTowardJourney and lean toward one of its tracks — each carries the sound a step toward where this arc is heading. If it comes back thin, pick via the library mood/genre/audio tools and keep the energy heading the same way. Never mention the journey on air.'
-      : '';
+    const journeyClause = !(audioWaypoint && audioWaypoint.length)
+      ? ''
+      : pickShow
+        ? ' A sonic journey is active, heading somewhere inside this show: call tracksTowardJourney and lean toward one of its tracks that fits the show\'s brief — each carries the sound a step along the arc. The brief outranks the arc: never take a track the brief rules out to follow it, and "same energy" or "same era" is no reason to leave it. If nothing fits, pick via the library mood/genre/audio tools inside the brief. Never mention the journey on air.'
+        : ' A sonic journey is active: call tracksTowardJourney and lean toward one of its tracks — each carries the sound a step toward where this arc is heading. If it comes back thin, pick via the library mood/genre/audio tools and keep the energy heading the same way. Never mention the journey on air.';
     // Surface the expected predecessor's real Subsonic id so similarSongs /
     // tracksLikeThis actually have one
     // to pass. Without it the agent fabricates a slug from the title/artist
@@ -1471,6 +1487,10 @@ export async function runTrackEvent(queue, ctx, { wantLink, showAt = null, pickA
     // multiplies across the window. Mirrored by the pool picker's listener-liked
     // source so both paths lean the same way — a lean, never a lock.
     const favClause = timePhase('pick.favouritesClause', () => likes.favouritesClause(settings.get()?.likes));
+    // With a show on air a favourite is a lean inside its brief, never a reason
+    // to leave it (#1911): a reported off-brief pick cited a favourite and the
+    // outgoing show's mood, not the incoming brief.
+    const favShowClause = favClause && pickShow ? FAVOURITES_INSIDE_SHOW : '';
     // Exploration nudge (ε-greedy seed break, music/airing.ts): every pick
     // seeding discovery from the expected predecessor is a random walk that never
     // leaves its similarity cluster, so a fraction of picks steer the round
@@ -1488,7 +1508,16 @@ export async function runTrackEvent(queue, ctx, { wantLink, showAt = null, pickA
     // Keep its id model-facing so similarity tools can use it without showing
     // a raw id in the operator-facing event text.
     const anchorIdClause = explicitPickAnchor && pickAnchor?.id ? ` [id: ${pickAnchor.id}]` : '';
-    const promptSuffix = `${predecessorPrompt(predecessor)}${anchorIdClause}${favClause}${effectClause}${runClause}${journeyClause}${exploreClause}`;
+    // The changeover pick (#1911): under the look-ahead clock the incoming
+    // show's first track is picked while the live session, and so the whole
+    // window, still belongs to the outgoing show. The system prompt already
+    // carries the incoming brief; say which show this track airs in, last, so
+    // the outgoing history is not read as the show to pick for.
+    const liveShowId = session.getSession()?.show?.id ?? null;
+    const changeoverClause = (pickShow?.id ?? null) !== liveShowId
+      ? ` This track airs in ${pickShow ? `the show "${pickShow.name}"` : 'the autonomous block'}, which follows what is on air now: pick it for ${pickShow ? 'that show\'s brief' : 'that block'}, not for what is ending.`
+      : '';
+    const promptSuffix = `${predecessorPrompt(predecessor)}${anchorIdClause}${favClause}${favShowClause}${effectClause}${runClause}${journeyClause}${exploreClause}${changeoverClause}`;
     timePhase('pick.appendTurn', () => session.appendTurn({
       role: 'event', kind: 'pick', text: eventText,
       meta: promptSuffix ? { promptSuffix } : {},
