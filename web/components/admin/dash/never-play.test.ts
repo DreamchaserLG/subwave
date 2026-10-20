@@ -1,8 +1,8 @@
 // "Never play" on the Dash's now-playing track: what the operator is told
 // after the confirm dialog, and the read the optional skip is decided on. The
 // block is the existing POST /library/blocklist (absolute, requests included);
-// the skip is the existing POST /dj/skip and is the operator's choice in the
-// dialog.
+// the skip is the existing POST /dj/skip, targeted at the blocked track, and
+// is the operator's choice in the dialog.
 //
 // Run: npm test -- never-play
 
@@ -10,8 +10,8 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { onlineManager, QueryClient, QueryObserver } from '@tanstack/react-query';
 import { toast } from 'sonner';
-import { blockPlayingTrack, neverPlayToast, notifyNeverPlay, refetchOnAirId, skipDecision } from './never-play';
-import { dashKeys, removeQueuedRow } from './queries';
+import { blockPlayingTrack, neverPlayToast, notifyNeverPlay, refetchOnAirId, skipDecision, skipFailureOutcome } from './never-play';
+import { dashKeys, removeQueuedRow, runDashAction } from './queries';
 import type { DashStatus } from './types';
 import type { BlockEntry } from '../library/types';
 
@@ -343,4 +343,86 @@ test('no new entry: no Undo, error or not', () => {
   notifyNeverPlay(neverPlayToast({ ...T, block: 'already', skip: 'done' }), undefined, async () => {});
   assert.equal(lastToast().type, 'success');
   assert.equal(lastToast().action, undefined);
+});
+
+// The skip is TARGETED at the blocked track (#2017). The controller refuses
+// with 409 when that track is not what the mixer is playing — it ended during
+// the commit wait, a bed or break followed it (neither moves now-playing on),
+// or a jingle is still airing ahead of it (the jingle's seam names the song
+// after it early) — and the toast says which, rather than "skip failed" over
+// a skip that was correctly withheld.
+async function targetedSkip(status: number, body: unknown) {
+  const s = stubFetch(status, body);
+  try {
+    await runDashAction(s.fetcher, '/dj/skip', { expectId: 'a' });
+    return { outcome: 'done' as const, calls: s.calls };
+  } catch (error) {
+    return { outcome: skipFailureOutcome(error), error, calls: s.calls };
+  }
+}
+
+test('targeted skip: the request names the blocked track', async () => {
+  const r = await targetedSkip(200, { ok: true });
+  assert.equal(r.outcome, 'done');
+  const [call] = r.calls;
+  assert.ok(call);
+  assert.equal(call.path, '/dj/skip');
+  assert.deepEqual(JSON.parse(String(call.init?.body)), { expectId: 'a' });
+});
+
+// Each refusal reason, through the request, the outcome, the toast and the
+// new entry's Undo. Three mean the blocked track is not what the mixer is
+// playing; `jingle-on-air` means it is next or has only just started, so the
+// operator is told to skip again, not that it left.
+const REFUSALS = [
+  { reason: 'track-changed', error: 'that track is no longer on air — nothing skipped', outcome: 'moot', copy: 'no longer on air, nothing skipped' },
+  { reason: 'bed-on-air', error: 'a bed is on air after that track — nothing skipped', outcome: 'moot', copy: 'no longer on air, nothing skipped' },
+  { reason: 'break-on-air', error: 'a pause-and-talk break is on air after that track — nothing skipped', outcome: 'moot', copy: 'no longer on air, nothing skipped' },
+  { reason: 'jingle-on-air', error: 'a jingle is on air, about to air or just ended — nothing skipped', outcome: 'behind-jingle', copy: 'a jingle is on air or just ended, nothing skipped — skip again in a few seconds' },
+] as const;
+
+for (const r of REFUSALS) {
+  test(`targeted skip: a 409 ${r.reason} is the ${r.outcome} toast, not a failure, and keeps its Undo`, async () => {
+    const res = await targetedSkip(409, { error: r.error, reason: r.reason, onAirId: r.reason === 'track-changed' ? 'b' : 'a' });
+    assert.equal(res.outcome, r.outcome);
+    const t = neverPlayToast({ ...T, block: 'added', skip: res.outcome });
+    assert.deepEqual(t, { tone: 'ok', text: `“Blindspot” — Bomb the Bass will never air again · ${r.copy}` });
+    notifyNeverPlay(t, ENTRY, async () => {});
+    const shown = lastToast();
+    assert.equal(shown.type, 'success');
+    assert.equal(shown.title, t.text);
+    assert.equal(shown.action?.label, 'Undo');
+  });
+}
+
+// A reason this build does not know, or none at all, is the answer every 409
+// got before the reasons were told apart: moot, never a failure.
+test('targeted skip: a 409 with an unknown or absent reason is moot', async () => {
+  for (const body of [{ error: 'nothing skipped', reason: 'something-new' }, { error: 'nothing skipped' }, {}]) {
+    assert.equal((await targetedSkip(409, body)).outcome, 'moot', JSON.stringify(body));
+  }
+});
+
+test('targeted skip: any other error still reads as a failed skip, with its message', async () => {
+  const r = await targetedSkip(500, { error: 'liquidsoap telnet timeout' });
+  assert.equal(r.outcome, 'failed');
+  assert.ok(r.error instanceof Error);
+  assert.equal(r.error.message, 'liquidsoap telnet timeout', 'the message every dash toast showed before');
+  assert.equal(skipFailureOutcome(new Error('network down')), 'failed');
+});
+
+// Both halves at once: the Undo on a refused skip's toast lifts the entry the
+// block just added, like any other outcome's.
+test('targeted skip: Undo after a refused skip lifts the new entry', async () => {
+  const r = await targetedSkip(409, { error: 'that track is no longer on air — nothing skipped', reason: 'track-changed', onAirId: 'b' });
+  assert.equal(r.outcome, 'moot');
+  const lifted: BlockEntry[] = [];
+  notifyNeverPlay(neverPlayToast({ ...T, block: 'added', skip: r.outcome }), ENTRY, async e => { lifted.push(e); });
+  const shown = lastToast();
+  assert.equal(shown.type, 'success');
+  assert.equal(shown.title, '“Blindspot” — Bomb the Bass will never air again · no longer on air, nothing skipped');
+  assert.equal(shown.action?.label, 'Undo');
+  shown.action?.onClick({});
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(lifted, [ENTRY]);
 });

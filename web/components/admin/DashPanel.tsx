@@ -46,7 +46,7 @@ import { cn } from '../../lib/cn';
 import { RequestsCard } from './dash/RequestsCard';
 import { TakeoverCard } from './dash/TakeoverCard';
 import QueueHeldBadge from './dash/QueueHeldBadge';
-import { blockPlayingTrack, neverPlayToast, notifyNeverPlay, refetchOnAirId, skipDecision, type SkipOutcome } from './dash/never-play';
+import { blockPlayingTrack, neverPlayToast, notifyNeverPlay, refetchOnAirId, skipDecision, skipFailureOutcome, type SkipOutcome } from './dash/never-play';
 import { deleteBlockEntry, reconcileBlockCaches } from './library/block-actions';
 import type { BlockEntry } from './library/types';
 import { deadlineFallbacks, djLatencyMs, failedCallsNote } from './dash/latency-gauge';
@@ -273,20 +273,23 @@ export default function DashPanel() {
         // in flight, and the closure would still show the blocked one
         // (skipping its successor for every listener). A failed or offline
         // refetch is no read, and nothing is skipped without one. The read
-        // cannot see a jingle, bed or pause-talk break (none updates
-        // now-playing) and /dj/skip takes no target, so either can still cut
-        // what follows the blocked song, as the plain Skip can; a targeted
-        // skip is a controller follow-up.
+        // names a song, never what airs: a bed or pause-talk break leaves
+        // now-playing on the song before it, a jingle's seam moves it on to
+        // the song after it while the outgoing tail and the jingle still
+        // play, and the song can end during the skip's commit wait. So the
+        // skip names its target and the controller refuses (409) unless the
+        // blocked track is what is on air: moot, or behind a jingle, which
+        // tells the operator to skip again in a few seconds.
         const onAirId = await refetchOnAirId(queryClient);
         const decision = skipDecision({ targetId: target.id, onAirId });
         if (decision === 'skip') {
           setBusy('skip');
           try {
-            await actionMutation.mutateAsync({ path: '/dj/skip', body: {} });
+            await actionMutation.mutateAsync({ path: '/dj/skip', body: { expectId: target.id } });
             skip = 'done';
           } catch (e) {
-            skip = 'failed';
-            skipError = errorMessage(e);
+            skip = skipFailureOutcome(e);
+            if (skip === 'failed') skipError = errorMessage(e);
           }
         } else {
           skip = decision;
