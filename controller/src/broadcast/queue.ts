@@ -36,7 +36,8 @@ import * as djAgent from './dj-agent.js';
 import * as programme from './programme.js';
 import * as sfx from './sfx.js';
 import * as jingles from './jingles.js';
-import { pickRotateJingle, onJingleRotateOwnerChange } from './jingle-rotate.js';
+import { jinglePlacement, pickRotateJingle, onJingleRotateOwnerChange } from './jingle-rotate.js';
+import { overlayDue, overlayEnabled, overlayOffer, overlayOpening, overlayFits, overlayMixerStatus } from './jingle-overlay.js';
 import * as beds from './beds.js';
 import * as bedPolicy from './bed-policy.js';
 import { vocalRunwayMs, segmentFitsRunway } from './vocal-runway.js';
@@ -150,13 +151,18 @@ import type { PendingTalk } from './queue/kinds.js';
 import {
   BED_MARKER_FRESH_MS,
   VOICE_LEADIN_MS,
+  HANDOFF_TO_AIR_MS,
+  VOICE_HOLD_MAX_MS,
   airVoice,
+  voiceBusy,
+  measuredClipDurationMs,
   clipDurationMs,
   speechDurationMs,
   writeHandoff,
   jingleAiredAtMs,
   jingleWaitMs,
   jingleWindow,
+  lastAiredJingleFilename,
   interposedSince,
   type QueuedVoice,
   type VoiceHandoff,
@@ -165,6 +171,10 @@ import { awaitIntroRender, IntroRenderTracker } from './queue/intro-render.js';
 import { notifyQueued, notifySpoken } from './voice-events.js';
 import { createHandoverEdge, notifyCoastHandover, type HandoverReason } from './coast-handover.js';
 import { picksAllowed } from './dj-budget.js';
+
+const NOW_PLAYING_POLL_MS = 1500;
+// Two watcher ticks, so a song's opening always gets at least one offer.
+const OVERLAY_HEAD_WINDOW_MS = NOW_PLAYING_POLL_MS * 2;
 
 // Everything the outside world is told about ONE spoken segment, held in a
 // single value because it is now read twice — once when the clip is committed
@@ -431,7 +441,14 @@ class Queue {
   // truth for it. Only the CAP is per-caller, which is what `rotate` records.
   _pendingJingles = new Map<string, { at: number; rotate: boolean }>();
   _tracksSinceJingle = 0;       // track boundaries since the last controller-drawn jingle — the count radio.liq's rotate used to keep (#1619)
-  _lastRotateJingle: string | null = null; // last jingle the controller drew — anti-repeat for jingle-rotate.pickRotateJingle
+  _lastRotateJingle: string | null = null; // last jingle handed to the mixer (rotate, overlay or operator press) — the anti-repeat fallback when no jingle marker exists yet
+  _tracksSinceOverlay = 0;      // song starts since the last overlay offer — read only in `over`; `both` rides _tracksSinceJingle (jingle-overlay.overlayDue)
+  private _overlayBoundary: { at: number; speech: boolean; offered: boolean } | null = null;
+  // Speech that is still being written or rendered has no handoff yet, so
+  // onQueued has not reserved the song for it. Counted so an optional overlay
+  // ID cannot take the song's opening from it (see whileTalkInFlight).
+  _talkInFlight = 0;
+  _overlayMixerStatus = async () => overlayMixerStatus(await liquidsoapControl.sendCommand('jingle_overlay_status'));
   _bedCatalog = beds.catalog;
   _bedGetPath = beds.getPath;
   _writeHandoff = writeHandoff;
@@ -612,6 +629,7 @@ class Queue {
           // Persist the absolute rotate count so controller restarts do not reset the jingle interval.
           // #1619.
           tracksSinceJingle: this._tracksSinceJingle,
+          tracksSinceOverlay: this._tracksSinceOverlay,
           lastRotateJingle: this._lastRotateJingle,
           savedAt: new Date().toISOString(),
         }, null, 2));
@@ -667,6 +685,8 @@ class Queue {
       // existed reads as 0, which is the pre-#1619 behaviour.
       const since = Number(stored.tracksSinceJingle);
       this._tracksSinceJingle = Number.isFinite(since) && since >= 0 ? Math.floor(since) : 0;
+      const overlaySince = Number(stored.tracksSinceOverlay);
+      this._tracksSinceOverlay = Number.isFinite(overlaySince) && overlaySince >= 0 ? Math.floor(overlaySince) : 0;
       this._lastRotateJingle = typeof stored.lastRotateJingle === 'string' ? stored.lastRotateJingle : null;
       if (this.current?.track) {
         const t = this.current.track;
@@ -2434,6 +2454,11 @@ class Queue {
       this.log('scheduler', `Dropped ${kind} — the show handoff has already claimed this boundary`);
       return { accepted: false, deferred: false, completed: Promise.resolve(false) };
     }
+    // Until its handoff the clip is invisible to the overlay's song reservation
+    // (onQueued). Speech held for the next boundary cannot meet a song-opening
+    // ID, so only immediate speech counts.
+    const inFlight = currentTalkAir() === 'immediate';
+    if (inFlight) this._talkInFlight++;
     try {
       const wavPath = await this._speak(safeText, { kind, persona });
       if (hostSpeech && !session.isHostSpeechCurrent(hostSpeech)) {
@@ -2491,6 +2516,20 @@ class Queue {
     } catch (err) {
       this.log('error', `Announce failed: ${(err as Error).message}`);
       return { accepted: false, deferred: false, completed: Promise.resolve(false) };
+    } finally {
+      if (inFlight) this._talkInFlight--;
+    }
+  }
+
+  // A scheduled fire spends most of its life writing the script, long before
+  // announce() renders it. The talk tick wraps each immediate fire in this so
+  // an overlay offered meanwhile sees speech is coming.
+  async whileTalkInFlight<T>(fn: () => Promise<T>): Promise<T> {
+    this._talkInFlight++;
+    try {
+      return await fn();
+    } finally {
+      this._talkInFlight--;
     }
   }
 
@@ -2514,6 +2553,12 @@ class Queue {
   // whole value of the event is that it lands early. Nothing is logged or
   // persisted here: this is a forecast, and the booth log records what aired.
   onQueued(q: QueuedVoice, { kind, channel, text, meta = {}, persona = null }: SegmentDesc) {
+    // A jingle is one kind of event on air however it was placed (playJingle):
+    // it is not DJ speech, so it reserves no song and publishes no voice.* event.
+    if (kind === 'jingle') return;
+    // Remember speech for the whole song, even after its handoff was consumed
+    // or its clip finished. An optional ID never follows another voice on it.
+    if (this._overlayBoundary) this._overlayBoundary.speech = true;
     try {
       const safeText = normalizeForDisplay(text);
       notifyQueued({
@@ -2562,17 +2607,22 @@ class Queue {
           ...(durationMs != null ? { durationMs } : {}),
         },
       });
-      notifySpoken({
-        voiceId: handoff.voiceId,
-        kind,
-        channel,
-        text: safeText,
-        durationMs: handoff.clipMs,
-        airedAt,
-        legacy,
-        personaId: persona?.id ?? (meta.personaId as string | undefined) ?? null,
-        personaName: persona?.name ?? (meta.personaName as string | undefined) ?? null,
-      });
+      // An overlay ID gets the booth line and session turn every jingle gets,
+      // but, like a manual or rotate jingle, no voice.* or dj.say webhook: a
+      // relay posting DJ speech would otherwise post the ID every N songs.
+      if (kind !== 'jingle') {
+        notifySpoken({
+          voiceId: handoff.voiceId,
+          kind,
+          channel,
+          text: safeText,
+          durationMs: handoff.clipMs,
+          airedAt,
+          legacy,
+          personaId: persona?.id ?? (meta.personaId as string | undefined) ?? null,
+          personaName: persona?.name ?? (meta.personaName as string | undefined) ?? null,
+        });
+      }
       return true;
     } catch (err) {
       this.log('error', `Post-air bookkeeping failed: ${(err as Error).message}`);
@@ -3340,6 +3390,7 @@ class Queue {
     }
     await writeHandoff(config.liquidsoap.jingleFile, jingles.jingleUri(path), { maxWaitMs: 5000 });
     this._pendingJingles.set(filename, { at: Date.now(), rotate });
+    this._lastRotateJingle = filename;
     // The sidecar's own script, not the hashed filename: every other segment
     // turn in the booth log and the listener booth carries prose, and
     // `jingle_a1b2c3d4.wav` reads as noise next to them (playSfx logs its
@@ -3368,6 +3419,7 @@ class Queue {
   // switch should start a clean N-track cycle.
   resetRotateJingleCount() {
     this._tracksSinceJingle = 0;
+    this._tracksSinceOverlay = 0;
   }
 
   // Draw the AUTOMATIC jingle — the rotate radio.liq used to run on its own
@@ -3398,7 +3450,7 @@ class Queue {
     this._tracksSinceJingle = 0;
     const filename = pickRotateJingle(
       (await jingles.list()).map(j => j.filename),
-      this._lastRotateJingle,
+      lastAiredJingleFilename() ?? this._lastRotateJingle,
     );
     if (!filename) {
       this.log('scheduler', '[jingle] rotate skipped — the jingle library is empty');
@@ -3423,6 +3475,91 @@ class Queue {
       if (now - p.at > PENDING_JINGLE_TTL_MS || jingleAiredAtMs(name) >= p.at) {
         this._pendingJingles.delete(name);
       }
+    }
+  }
+
+  // Watcher-driven, one offer per song. Never put an optional ID behind paid
+  // speech, nor retry it mid-song. The real voice serialiser owns playback;
+  // the mixer rechecks its live gates when it consumes the annotated intro.
+  async maybeAirJingleOverlay() {
+    const boundary = this._overlayBoundary;
+    const item = this.current;
+    if (!boundary || boundary.offered || !item) return;
+    const s = settings.get();
+    const placement = jinglePlacement(s);
+    // The previous song's stamp governs when this one's opening clears.
+    const openingMs = Math.max(s.crossfadeDuration, this.history[0]?.track.crossSec ?? 0) * 1000;
+    const pendingTalk = () => !!this._pendingVoice || this._talkInFlight > 0
+      || session.handoffInProgress() || !!session.pendingHandoff();
+    this.retirePendingJingles();
+    const due = overlayDue({
+      placement, ratio: s.jingleRatio,
+      tracksSinceOverlay: this._tracksSinceOverlay, tracksSinceJingle: this._tracksSinceJingle,
+    });
+    const decision = overlayOffer({
+      due, elapsedMs: Date.now() - boundary.at, crossfadeMs: openingMs, headWindowMs: OVERLAY_HEAD_WINDOW_MS,
+      trackVoice: boundary.speech || !!(item.introScript || item.introWav || item.introAired || item.bedded || item.stemSeam),
+      voiceBusy: voiceBusy(), pendingTalk: pendingTalk(),
+      pendingJingle: this._pendingJingles.size > 0,
+    });
+    if (decision === 'wait') return;
+    boundary.offered = true; // claim before any await; watcher ticks can overlap
+    if (!due) return;
+    this._tracksSinceOverlay = 0; // unsafe offers are spent, never banked
+    this.persist();
+    if (decision !== 'draw') return;
+    try {
+      const catalog = await jingles.list();
+      const filename = pickRotateJingle(catalog.map(j => j.filename), lastAiredJingleFilename() ?? this._lastRotateJingle);
+      if (!filename) return;
+      const path = await jingles.getPath(filename);
+      if (!path) return;
+      const clipMs = measuredClipDurationMs(path);
+      // The shared serialiser caps its hold. A clip it cannot hold in full
+      // belongs between songs, as does an import we cannot measure locally.
+      if (clipMs == null) return;
+      const windowMs = speechDurationMs(path, '');
+      if (windowMs >= VOICE_HOLD_MAX_MS) return;
+      const mixer = await this._overlayMixerStatus();
+      if (!mixer) return;
+      // This song's stamp governs its EXIT. The previous song's stamp above
+      // only governs when its opening clears; adaptive stamps can differ even
+      // with a zero station default. Unstamped songs use the running mixer.
+      const exitCrossfadeMs = item.track.crossSec != null && item.track.crossSec >= 0
+        ? item.track.crossSec * 1000 : mixer.crossfadeMs;
+      // Same opening window as the offer. The running mixer's crossfade joins
+      // the bound because it can outlast the saved one until a restart.
+      const crossfadeMs = Math.max(openingMs, mixer.crossfadeMs);
+      const checkedAt = Date.now();
+      const stillSafe = () => {
+        const live = settings.get();
+        const elapsedMs = Date.now() - boundary.at;
+        return this._overlayBoundary === boundary && this.current === item && !boundary.speech
+          && overlayEnabled(jinglePlacement(live), live.jingleRatio)
+          && !pendingTalk() && !this._pendingJingles.size
+          && overlayOpening({ elapsedMs, crossfadeMs, headWindowMs: OVERLAY_HEAD_WINDOW_MS }) === 'open'
+          && overlayFits({
+            elapsedMs,
+            windowMs: windowMs + HANDOFF_TO_AIR_MS,
+            remainingMs: mixer.remainingMs - (Date.now() - checkedAt),
+            exitCrossfadeMs,
+            runwayMs: vocalRunwayMs(item.track),
+          });
+      };
+      if (!stillSafe()) return;
+      const text = catalog.find(j => j.filename === filename)?.text || filename;
+      const seg: SegmentDesc = { kind: 'jingle', channel: 'intro', text, meta: { ...VERBATIM_META } };
+      const handoff = await this._airVoice(config.liquidsoap.introFile, path, text, 0, {
+        skipIfBusy: true, beforeWrite: stillSafe, jingleOverlay: true, jingleOverlayTrackAt: boundary.at,
+      });
+      if (!handoff) return;
+      this._lastRotateJingle = filename;
+      this.persist();
+      // A mixer can reject a racing offer. Only its actual-start marker earns
+      // a booth/session entry; an optional ID is never reported as estimated.
+      if (await handoff.aired != null) await this.onSpoken(handoff, seg);
+    } catch (err) {
+      this.log('scheduler', `[jingle] overlay skipped — ${(err as Error).message}`);
     }
   }
 
@@ -3452,6 +3589,14 @@ class Queue {
     // radio.liq's `rotate(weights=[1, jingle_ratio()])` counted, and the
     // controller can draw the stinger the mixer used to draw itself.
     this._tracksSinceJingle++;
+    this._tracksSinceOverlay++;
+    const incoming = this.upcoming[this.matchUpcomingIndex(np)];
+    const timestampMs = Number(np.timestamp) * 1000;
+    this._overlayBoundary = {
+      at: Number.isFinite(timestampMs) && timestampMs > 0 ? timestampMs : Date.now(),
+      speech: !!(incoming?.introScript || incoming?.introWav || incoming?.bedded || this._pendingVoice),
+      offered: false,
+    };
 
     // A fresh track boundary — air any boundary-deferred segment (station
     // ident) now, unless this boundary already carries the incoming track's own
@@ -4886,6 +5031,7 @@ class Queue {
       // already inside the head budget bed-policy sizes the bed with.
       this.onBedStarted();
       this.onPauseTalkStarted();
+      void this.maybeAirJingleOverlay();
       // Pair-aware transitions: the deadline pick + a drain re-run every
       // tick. Drain holds are time-gated, and push() only fires the drain on
       // mutation — the clock advancing past a deadline has to re-trigger it
@@ -4894,7 +5040,7 @@ class Queue {
       void this.drainToLiquidsoap();
     };
     void tick();
-    setInterval(tick, 1500);
+    setInterval(tick, NOW_PLAYING_POLL_MS);
     this.log('scheduler', 'Now-playing watcher started');
   }
 
