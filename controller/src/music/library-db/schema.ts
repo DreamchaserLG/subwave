@@ -469,6 +469,20 @@ export async function migrate(embeddingDim: number, reseed = false, adoptStoredD
     d.pragma('user_version = 29');
   }
 
+  if (userVersion < 30) {
+    // The operator's lyric timing correction, one per track (lyrics.ts). A
+    // property of the track's lyric file, so it is station-wide and keyed on the
+    // track alone; id-adoption.ts carries it across an ID rotation like plays.
+    runDdl(d, `
+      CREATE TABLE IF NOT EXISTS lyric_offsets (
+        track_id   TEXT PRIMARY KEY,
+        offset_ms  INTEGER NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+    `);
+    d.pragma('user_version = 30');
+  }
+
   // Before the vector reconcile below, which bumps it when it drops vectors.
   // Never throws. Its update trigger names tracks.genres and tracks.moods, and
   // SQLite refuses to DROP COLUMN either while it exists: a migration above

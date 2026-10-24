@@ -7,7 +7,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AnimatePresence } from 'motion/react';
 import { toast } from 'sonner';
-import { CalendarClock, History, Mic } from 'lucide-react';
+import { CalendarClock, Captions, History, Mic } from 'lucide-react';
 import TopBar from './TopBar';
 import CenterStage from './CenterStage';
 import Waveform from './Waveform';
@@ -21,6 +21,7 @@ import TimelineDrawer from './drawers/TimelineDrawer';
 import BoothDrawer from './drawers/BoothDrawer';
 import RequestDrawer from './drawers/RequestDrawer';
 import ScheduleDrawer from './drawers/ScheduleDrawer';
+import LyricsDrawer from './drawers/LyricsDrawer';
 import { Sheet } from '@/components/ui/sheet';
 import {
   usePlayerActions,
@@ -38,6 +39,7 @@ const DRAWER_TITLES: Record<PlayerDrawer, string> = {
   booth: 'Booth feed',
   request: 'Make a request',
   schedule: 'Schedule',
+  lyrics: 'Lyrics',
 };
 
 // Hoisted so the DotRail counts memo below keeps stable element references —
@@ -45,6 +47,9 @@ const DRAWER_TITLES: Record<PlayerDrawer, string> = {
 const TIMELINE_ICON = <History size={18} strokeWidth={1.5} />;
 const BOOTH_ICON = <Mic size={18} strokeWidth={1.5} />;
 const SCHEDULE_ICON = <CalendarClock size={18} strokeWidth={1.5} />;
+const LYRICS_ICON = <Captions size={18} strokeWidth={1.5} />;
+// The rail without its Lyrics entry, for a station that has the panel off.
+const HIDE_LYRICS: readonly PlayerDrawer[] = ['lyrics'];
 
 export default function ClassicSkin({ portalNode }: SkinProps) {
   const client = useStationClient();
@@ -83,6 +88,7 @@ export default function ClassicSkin({ portalNode }: SkinProps) {
       timeline: upcomingCount || TIMELINE_ICON,
       booth: BOOTH_ICON,
       schedule: SCHEDULE_ICON,
+      lyrics: LYRICS_ICON,
     }),
     [upcomingCount],
   );
@@ -97,6 +103,13 @@ export default function ClassicSkin({ portalNode }: SkinProps) {
   const [tickerOn, setTickerOn] = useState(true);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
+
+  // The operator's switch rides GET /state. Off, the panel has no entry point,
+  // and one already open closes rather than sit on a refusal.
+  const lyricsOn = state.lyrics?.enabled === true;
+  useEffect(() => {
+    if (!lyricsOn && drawer === 'lyrics') setDrawer(null);
+  }, [lyricsOn, drawer]);
 
   // Haptics live here rather than at each call site so every entry point
   // (DotRail, shortcut, palette, swipe-dismiss) feels the same.
@@ -140,6 +153,7 @@ export default function ClassicSkin({ portalNode }: SkinProps) {
       '2': () => setDrawer('booth'),
       '3': () => setDrawer('request'),
       '4': () => setDrawer('schedule'),
+      ...(lyricsOn ? { '5': () => setDrawer('lyrics'), l: () => setDrawer('lyrics') } : {}),
       r: () => setDrawer('request'),
       '?': () => setShortcutsOpen(true),
       'mod+k': () => setPaletteOpen(o => !o),
@@ -197,7 +211,7 @@ export default function ClassicSkin({ portalNode }: SkinProps) {
         duration={nowPlaying?.duration ?? 0}
       />
 
-      <DotRail counts={dotRailCounts} active={drawer} onSelect={setDrawer} />
+      <DotRail counts={dotRailCounts} hidden={lyricsOn ? undefined : HIDE_LYRICS} active={drawer} onSelect={setDrawer} />
 
       <TransportBar
         tunedIn={tunedIn}
@@ -237,6 +251,14 @@ export default function ClassicSkin({ portalNode }: SkinProps) {
           />
         )}
         {drawer === 'schedule' && <ScheduleDrawer activeShow={activeShow} context={context} />}
+        {drawer === 'lyrics' && (
+          <LyricsDrawer
+            songId={nowPlaying?.subsonic_id}
+            title={nowPlaying?.title}
+            artist={nowPlaying?.artist}
+            trackStartedAt={trackStartedAt}
+          />
+        )}
       </Sheet>
 
       <AnimatePresence>
@@ -255,12 +277,14 @@ export default function ClassicSkin({ portalNode }: SkinProps) {
         onOpenDrawer={setDrawer}
         onToggleMute={toggleMute}
         onShowShortcuts={() => setShortcutsOpen(true)}
+        lyrics={lyricsOn}
       />
 
       <ShortcutsDialog
         open={shortcutsOpen}
         onOpenChange={setShortcutsOpen}
         container={portalNode}
+        lyrics={lyricsOn}
       />
     </>
   );

@@ -210,6 +210,17 @@ export function getPlaybackMeta(songId: string): db.TrackLite | null {
   return loaded ? db.getTrackLite(songId) : null;
 }
 
+// The operator's station-wide lyric timing correction (library-db/lyrics.ts).
+export async function getLyricOffset(songId: string): Promise<number> {
+  await load();
+  return db.getLyricOffset(songId);
+}
+
+export async function setLyricOffset(songId: string, offsetMs: number): Promise<void> {
+  await load();
+  db.setLyricOffset(songId, offsetMs);
+}
+
 // When a track entered the library, null if not in the tagged index. Playlist
 // sync keys "new since last sync" off this, so a Subsonic-only track reads
 // null and is never blind-appended.
