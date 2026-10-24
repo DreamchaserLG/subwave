@@ -589,8 +589,9 @@ export function describeRouting() {
   // fell back at all.
   const personaTts = resolvePersonaVoiceSlot(persona?.tts || null, tts);
   const requested = personaTts?.engine || tts.defaultEngine || 'piper';
-  // The effective persona speaks persona-voiced kinds, so its rescue applies.
-  const rescue = personaRescueSlot(persona?.fallbackVoice, ENGINES);
+  // The effective persona speaks persona-voiced kinds, so its rescue applies;
+  // 'link' is a persona-voiced kind, so the shared gate passes it through.
+  const rescue = personaRescue('link', persona);
   const slot = resolveEngine(personaTts, rescue);
   const engine = slot.engine;
   let voice: string | null = null;

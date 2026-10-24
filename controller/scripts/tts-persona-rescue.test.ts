@@ -164,4 +164,6 @@ test('every resolveEngine caller passes the gated persona rescue', () => {
   assert.equal(calls.length, 4, `four persona resolveEngine callers: ${calls}`);
   for (const c of calls) assert.match(c, /^resolveEngine\(personaTts, (rescue|personaRescue\(kind, persona\))\)/, c);
   assert.match(src, /function personaRescue\(kind: string, persona\?: any\): RescueSlot \| null \{\s*if \(GLOBAL_VOICE_KINDS\.has\(kind\)\) return null;/);
+  // The one gated helper is the only place the slot is built.
+  assert.equal((src.match(/personaRescueSlot\(/g) || []).length, 1, 'personaRescueSlot is called only inside personaRescue()');
 });

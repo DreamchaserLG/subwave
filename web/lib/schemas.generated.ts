@@ -1146,14 +1146,14 @@ const personaFallbackVoice = z
   .optional()
   .transform((raw, ctx): PersonaFallbackVoice | null => {
     if (raw == null) return null;
-    // An absent provider reads as 'openai', as on the station slot
-    // (configuredSlot): it only matters when the engine is cloud, and a
-    // `{engine: 'gemini', voice: 'Kore'}` body should not fail on it.
+    // An absent provider reads as 'openai' only where it is unused (every
+    // engine but cloud), so `{engine: 'gemini', voice: 'Kore'}` saves. A cloud
+    // rescue must name its provider: defaulting it would quietly point an
+    // ElevenLabs station's rescue at OpenAI.
     const r = (typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
-    const parsed = ttsVoiceSlotSchema('fallbackVoice').safeParse({
-      ...r,
-      cloudProvider: r.cloudProvider ?? 'openai',
-    });
+    const parsed = ttsVoiceSlotSchema('fallbackVoice').safeParse(
+      r.engine === 'cloud' ? r : { ...r, cloudProvider: r.cloudProvider ?? 'openai' },
+    );
     if (!parsed.success) {
       for (const issue of parsed.error.issues) {
         ctx.addIssue({ code: 'custom', message: issue.message });

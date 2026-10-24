@@ -669,6 +669,27 @@ test('fallbackVoice is engine + provider + voice, with no level trims', () => {
   );
 });
 
+test('a cloud fallbackVoice must name its provider; other engines default it', () => {
+  // A cloud rescue with no provider must not quietly become OpenAI on an
+  // ElevenLabs station (and read as "covered" to the Doctor).
+  assert.throws(
+    () => validate.validatePersonasStrict([{ ...base(), fallbackVoice: { engine: 'cloud', voice: 'Rachel' } }]),
+    /fallbackVoice\.cloudProvider must be one of/,
+  );
+  assert.equal(repairPersonaFallbackVoice({ engine: 'cloud', voice: 'Rachel' }), null);
+  const [loaded] = normalize.normalizePersonaArray([{ ...base(), fallbackVoice: { engine: 'cloud', voice: 'Rachel' } }])!;
+  assert.equal(loaded.fallbackVoice, null);
+  assert.deepEqual(
+    personaSchema.parse({ ...base(), fallbackVoice: { engine: 'cloud', cloudProvider: 'elevenlabs', voice: 'Rachel' } }).fallbackVoice,
+    { engine: 'cloud', cloudProvider: 'elevenlabs', voice: 'Rachel' },
+  );
+  assert.deepEqual(
+    repairPersonaFallbackVoice({ engine: 'gemini', voice: 'Kore' }),
+    { engine: 'gemini', cloudProvider: 'openai', voice: 'Kore' },
+    'a non-cloud rescue still defaults the unused provider',
+  );
+});
+
 test('fallbackVoice refuses inherit and a bad voice on save, naming its own path', () => {
   assert.throws(
     () => validate.validatePersonasStrict([{ ...base(), fallbackVoice: { engine: 'inherit', voice: '' } }]),
