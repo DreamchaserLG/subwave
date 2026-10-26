@@ -43,12 +43,15 @@ function applyCorrections(text: string, corrections: readonly SpeechCorrection[]
   return t;
 }
 
-// Magnitude words that ride between a $ amount and the spoken "dollars":
-// "$5 million" must become "5 million dollars", not "5 dollars million".
-// The \b keeps "millionaire" from prefix-matching ("5 million dollarsaire").
-const DOLLAR_MAGNITUDE = '(?:\\s+(?:thousand|million|billion|trillion)\\b)?';
-// The $ amount itself: digits with their own formatting ("1,200", "12.50").
-const DOLLAR_AMOUNT = '\\d[\\d,]*(?:\\.\\d+)?';
+// Magnitude words that ride between a currency amount and its spoken unit:
+// "$5 million"/"£5 million" must become "5 million dollars/pounds", not
+// "5 dollars million". The \b keeps "millionaire" from prefix-matching
+// ("5 million dollarsaire").
+const CURRENCY_MAGNITUDE = '(?:\\s+(?:thousand|million|billion|trillion)\\b)?';
+// The amount itself: digits with their own formatting ("1,200", "12.50").
+// Commas count only in thousand-group shape, so "£25, and" ends the amount
+// at "25" instead of swallowing the comma into the spoken unit.
+const CURRENCY_AMOUNT = '\\d+(?:,\\d{3})*(?:\\.\\d+)?';
 
 const SMALL_NUMBERS = [
   'zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine',
@@ -419,10 +422,26 @@ export function normalizeForSpeech(
   // the year/decade and symbol rules so a correction can pre-empt an expansion.
   if (corrections?.length) t = applyCorrections(t, corrections);
 
-  // --- English years and decades (every engine, operator rules first) ---
-  // Before currency/unit expansion: their original symbols identify quantities.
+  // --- English years, decades, clock and catalogue abbreviations ---
+  // (every engine, operator rules first). Before currency/unit expansion:
+  // their original symbols identify quantities.
   const lang = language.trim();
-  if (!lang || ENGLISH_LANGUAGE_RE.test(lang)) t = normalizeYears(t);
+  if (!lang || ENGLISH_LANGUAGE_RE.test(lang)) {
+    t = normalizeYears(t);
+    // A clock meridiem glued to its hour ("8pm", "8a.m.", "12am") is a time
+    // at any hour; the spaced bare form ("8 pm") needs a 1–12 clock hour with
+    // optional minutes, so "1967 pm" and digit-ending identifiers stay clear.
+    // Both normalize to the dotted "p.m." shape espeak-class engines read as
+    // letters instead of one word. A trailing sentence dot is consumed with
+    // the match, so "8pm." never becomes "8 p.m..".
+    t = t.replace(/(\d)([ap])\.?m\.?(?![\p{L}\p{N}_])/giu, (_all, hour: string, ap: string) => `${hour} ${ap.toLowerCase()}.m.`);
+    t = t.replace(/\b((?:1[0-2]|0?[1-9])(?::[0-5]\d)?)\s+([ap])\.?m\.?(?![\p{L}\p{N}_])/giu, (_all, hour: string, ap: string) => `${hour} ${ap.toLowerCase()}.m.`);
+    // "No." reads as "number" only when a digit follows — the catalogue/chart
+    // reading ("No. 1" → "number 1"); the sentence word ("No. I'm not") and
+    // other abbreviations stay. Years already passed above with "no." as a
+    // protected identifier prefix, so "no. 1967" keeps its numeric reading.
+    t = t.replace(/\bno\.\s*(?=\d)/gi, 'number ');
+  }
 
   // --- units and symbols (all keyed on an adjacent digit — conservative) ---
   t = t.replace(/(\d)\s*°\s*F\b/g, '$1 degrees Fahrenheit');
@@ -436,21 +455,43 @@ export function normalizeForSpeech(
   // 1. The model already wrote the spoken form ("$5 million dollars", "$5
   //    dollars") — drop the symbol instead of speaking "dollars" twice.
   t = t.replace(
-    new RegExp(`\\$(${DOLLAR_AMOUNT}${DOLLAR_MAGNITUDE})(?=\\s+dollars?\\b)`, 'gi'),
+    new RegExp(`\\$(${CURRENCY_AMOUNT}${CURRENCY_MAGNITUDE})(?=\\s+dollars?\\b)`, 'gi'),
     '$1',
   );
   // 2./3. Compact magnitude suffixes ("$100k", "$5M", "$2bn") — expanded here
   //    so the letter can't glue onto "dollars" ("100 dollarsk"). Anchored on
   //    the $ AND the suffix, so a bare "5k run" is untouched.
-  t = t.replace(new RegExp(`\\$(${DOLLAR_AMOUNT})k\\b`, 'gi'), '$1 thousand dollars');
-  t = t.replace(new RegExp(`\\$(${DOLLAR_AMOUNT})m\\b`, 'gi'), '$1 million dollars');
-  t = t.replace(new RegExp(`\\$(${DOLLAR_AMOUNT})(?:bn|b)\\b`, 'gi'), '$1 billion dollars');
+  t = t.replace(new RegExp(`\\$(${CURRENCY_AMOUNT})k\\b`, 'gi'), '$1 thousand dollars');
+  t = t.replace(new RegExp(`\\$(${CURRENCY_AMOUNT})m\\b`, 'gi'), '$1 million dollars');
+  t = t.replace(new RegExp(`\\$(${CURRENCY_AMOUNT})(?:bn|b)\\b`, 'gi'), '$1 billion dollars');
   // 4. The plain form. The trailing (?!\w) leaves any OTHER glued suffix
   //    ("$100x") alone entirely — unspoken beats mangled.
   t = t.replace(
-    new RegExp(`\\$(${DOLLAR_AMOUNT}${DOLLAR_MAGNITUDE})(?!\\w)`, 'gi'),
+    new RegExp(`\\$(${CURRENCY_AMOUNT}${CURRENCY_MAGNITUDE})(?!\\w)`, 'gi'),
     '$1 dollars',
   );
+  // £ and € run the same four passes as $ (#2103) with their own units: the
+  // spoken-form dedup, the compact magnitude suffixes, then the plain form
+  // that still requires the symbol to PRECEDE the digits ("£25", "€10 online")
+  // and the amount to end on a word edge ("£100x" stays untouched). A symbol
+  // spaced or placed after its digits ("£ 5", "5 €") keeps the engine's own
+  // reading — unspoken beats mangled, same policy as $.
+  t = t.replace(
+    new RegExp(`£(${CURRENCY_AMOUNT}${CURRENCY_MAGNITUDE})(?=\\s+pounds?\\b)`, 'gi'),
+    '$1',
+  );
+  t = t.replace(new RegExp(`£(${CURRENCY_AMOUNT})k\\b`, 'gi'), '$1 thousand pounds');
+  t = t.replace(new RegExp(`£(${CURRENCY_AMOUNT})m\\b`, 'gi'), '$1 million pounds');
+  t = t.replace(new RegExp(`£(${CURRENCY_AMOUNT})(?:bn|b)\\b`, 'gi'), '$1 billion pounds');
+  t = t.replace(new RegExp(`£(${CURRENCY_AMOUNT}${CURRENCY_MAGNITUDE})(?!\\w)`, 'gi'), '$1 pounds');
+  t = t.replace(
+    new RegExp(`€(${CURRENCY_AMOUNT}${CURRENCY_MAGNITUDE})(?=\\s+euros?\\b)`, 'gi'),
+    '$1',
+  );
+  t = t.replace(new RegExp(`€(${CURRENCY_AMOUNT})k\\b`, 'gi'), '$1 thousand euros');
+  t = t.replace(new RegExp(`€(${CURRENCY_AMOUNT})m\\b`, 'gi'), '$1 million euros');
+  t = t.replace(new RegExp(`€(${CURRENCY_AMOUNT})(?:bn|b)\\b`, 'gi'), '$1 billion euros');
+  t = t.replace(new RegExp(`€(${CURRENCY_AMOUNT}${CURRENCY_MAGNITUDE})(?!\\w)`, 'gi'), '$1 euros');
   t = t.replace(/(\d)\s*mph\b/gi, '$1 miles per hour');
   t = t.replace(/(\d)\s*km\/h\b/gi, '$1 kilometers per hour');
   // "&" reads as "and" everywhere — that's the spoken form even inside names

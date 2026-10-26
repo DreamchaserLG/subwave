@@ -120,7 +120,7 @@ const quantities = [
   '1984 recorded songs', '1984 young people',
   'Call 212 555 1967.', 'Call 1967 555 212.', 'Call 212 1967 555.',
   'Room 1967', 'catalogue number 1967', 'catalogue 1967', 'catalog 1967',
-  'cat. 1967', 'no. 1967', 'number 1967', '#1967', 'Catalogue # 1967', 'serial 1967',
+  'cat. 1967', 'number 1967', '#1967', 'Catalogue # 1967', 'serial 1967',
   'model 1967', 'flight 1967', 'route 1967', 'track number 1967',
   'extension 1967', 'ext 1967', 'ext. 1967',
   '11967', 'é1967', '1967é', 'release_1967', '1967s',
@@ -142,7 +142,8 @@ test('currency and units keep their existing expansions and numeric readings', (
   assert.equal(normalizeForSpeech('$1967.50'), '1967.50 dollars');
   assert.equal(normalizeForSpeech('$2000 million'), '2000 million dollars');
   assert.equal(normalizeForSpeech('$2000k'), '2000 thousand dollars');
-  assert.equal(normalizeForSpeech('£1967'), '£1967');
+  // £ mirrors $ since #2103: the digits stay numeric, the symbol becomes the unit.
+  assert.equal(normalizeForSpeech('£1967'), '1967 pounds');
   assert.equal(normalizeForSpeech('1967%'), '1967 percent');
   assert.equal(normalizeForSpeech('1967°F'), '1967 degrees Fahrenheit');
   assert.equal(normalizeForSpeech('1967 mph'), '1967 miles per hour');
@@ -157,7 +158,9 @@ for (const unit of ['ms', 'g', 'm', 'W', 'mg', 'cm', 'ml', 'kW', 'kHz', 'rpm', '
   });
 }
 
-for (const symbol of ['₹', '₩', '₽', '₦', '₺', '€', '£', '¥']) {
+// £ and € now expand like $ (see speech-text.test.ts); the remaining currency
+// glyphs have no expansion and must never receive year readings.
+for (const symbol of ['₹', '₩', '₽', '₦', '₺', '¥']) {
   test(`${symbol} currency quantities never receive year readings`, () => {
     assert.equal(normalizeForSpeech(`${symbol}1967`), `${symbol}1967`);
     assert.equal(normalizeForSpeech(`${symbol} 1967`), `${symbol} 1967`);
