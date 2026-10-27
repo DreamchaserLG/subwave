@@ -120,7 +120,7 @@ const quantities = [
   '1984 recorded songs', '1984 young people',
   'Call 212 555 1967.', 'Call 1967 555 212.', 'Call 212 1967 555.',
   'Room 1967', 'catalogue number 1967', 'catalogue 1967', 'catalog 1967',
-  'cat. 1967', 'number 1967', '#1967', 'Catalogue # 1967', 'serial 1967',
+  'cat. 1967', 'no. 1967', 'number 1967', '#1967', 'Catalogue # 1967', 'serial 1967',
   'model 1967', 'flight 1967', 'route 1967', 'track number 1967',
   'extension 1967', 'ext 1967', 'ext. 1967',
   '11967', 'é1967', '1967é', 'release_1967', '1967s',
@@ -144,6 +144,7 @@ test('currency and units keep their existing expansions and numeric readings', (
   assert.equal(normalizeForSpeech('$2000k'), '2000 thousand dollars');
   // £ mirrors $ since #2103: the digits stay numeric, the symbol becomes the unit.
   assert.equal(normalizeForSpeech('£1967'), '1967 pounds');
+  assert.equal(normalizeForSpeech('€1967'), '1967 euros');
   assert.equal(normalizeForSpeech('1967%'), '1967 percent');
   assert.equal(normalizeForSpeech('1967°F'), '1967 degrees Fahrenheit');
   assert.equal(normalizeForSpeech('1967 mph'), '1967 miles per hour');
@@ -166,6 +167,17 @@ for (const symbol of ['₹', '₩', '₽', '₦', '₺', '¥']) {
     assert.equal(normalizeForSpeech(`${symbol} 1967`), `${symbol} 1967`);
     assert.equal(normalizeForSpeech(`1967 ${symbol}`), `1967 ${symbol}`);
     assert.equal(normalizeForSpeech(`${symbol}1967-1972`), `${symbol}1967-1972`);
+  });
+}
+
+// A glued £/€ amount gains its spoken unit, but every digit run stays numeric;
+// spaced or trailing symbols keep the engine's reading, as for the glyphs above.
+for (const [symbol, unit] of [['£', 'pounds'], ['€', 'euros']]) {
+  test(`${symbol} currency quantities never receive year readings`, () => {
+    assert.equal(normalizeForSpeech(`${symbol}1967`), `1967 ${unit}`);
+    assert.equal(normalizeForSpeech(`${symbol} 1967`), `${symbol} 1967`);
+    assert.equal(normalizeForSpeech(`1967 ${symbol}`), `1967 ${symbol}`);
+    assert.equal(normalizeForSpeech(`${symbol}1967-1972`), `1967 ${unit}-1972`);
   });
 }
 
